@@ -31,7 +31,7 @@ extern "C" {
 #define CFG_TIME_WAIT_FOR_EXIT          40u
 #define CFG_TIME_NOTIFY_ACTIVE          0
 #define CFG_TIME_LED_BLINK              60u
-#define CFG_CURRENT_RISE_PERCENTAGE     300u
+#define CFG_CURRENT_RISE_PERCENTAGE     100u
 #define CFG_CURRENT_RISE_ALGORITHM      0
 #define CFG_CURRENT_DROP_PERCENTAGE     40u
 #define CFG_CURRENT_START_DETECTION_MA  1000u
@@ -75,7 +75,7 @@ extern "C" {
 #define LED_DROP_PIN_Pos                4
 #define LED_DROP_PIN_Msk                (0x01u << LED_DROP_PIN_Pos)
 
-#define SENS_FREQUENCY                  2000ul
+#define SENS_FREQUENCY                  1000ul
 
 #define SENS_ZERO_VALUE                 (1024u / 2u)
 
