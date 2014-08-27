@@ -14,41 +14,38 @@ extern "C" {
 
 #include <p18f1220.h>
 
+#define CFG_TIME_INITIAL_WAIT           100u
+
+#define CFG_TIME_FIND_ZERO              50u
+    
 /**@brief       Initial peak time duration in ms
  */
-#define CFG_TIME_INITIAL_PEAK           150u
+#define CFG_TIME_INITIAL_PEAK           200u
 
 /**@brief       Time period to calculate average value (which corresponds to
  *              minimal value). Time in ms.
  * @details     This period is positioned right after Initial peak time.
  */
-#define CFG_TIME_FIND_MIN               20u
+#define CFG_CURRENT_RISE_TIME_FIND_MIN  100u
 
-/**@brief       Allowable time to search for maximum value. Time in ms.
- */
-#define CFG_TIME_FIND_MAX               0
-
-#define CFG_TIME_WAIT_FOR_EXIT          40u
-#define CFG_TIME_NOTIFY_ACTIVE          0
 #define CFG_TIME_LED_BLINK              60u
 #define CFG_CURRENT_RISE_PERCENTAGE     100u
-#define CFG_CURRENT_RISE_ALGORITHM      0
-#define CFG_CURRENT_DROP_PERCENTAGE     40u
+#define CFG_CURRENT_DROP_PERCENTAGE     20u
 #define CFG_CURRENT_START_DETECTION_MA  1000u
-#define CFG_CURRENT_MIN_DETECTION_MA    350u
+#define CFG_CURRENT_MIN_DETECTION_MA    4000u
 #define CFG_SENS_UV_PER_AMPER           66000ul
 #define CFG_ADC_UV_QUANTUM              4882ul
  
 #define RELAY_DROP_PORT                 PORTB
 #define RELAY_DROP_TRIS                 TRISB
 #define RELAY_DROP_LAT                  LATB
-#define RELAY_DROP_PIN_Pos              0
+#define RELAY_DROP_PIN_Pos              1
 #define RELAY_DROP_PIN_Msk              (0x01u << RELAY_DROP_PIN_Pos)
 
 #define RELAY_RISE_PORT                 PORTB
 #define RELAY_RISE_TRIS                 TRISB
 #define RELAY_RISE_LAT                  LATB
-#define RELAY_RISE_PIN_Pos              1
+#define RELAY_RISE_PIN_Pos              0
 #define RELAY_RISE_PIN_Msk              (0x01u << RELAY_RISE_PIN_Pos)
 
 #define DEBUG_PIN_PORT                  PORTB
@@ -77,13 +74,11 @@ extern "C" {
 
 #define SENS_FREQUENCY                  1000ul
 
-#define SENS_ZERO_VALUE                 (1024u / 2u)
-
 #define SAMPLES_PER_POINT               16
 
 #define LVTMR_TICK_FREQUENCY            SENS_FREQUENCY
   
-#define CPU_FREQUENCY                   32000000ul
+#define CPU_FREQUENCY                   40000000ul
 #define SYSTICK_USE_DEDICATED_TMR       0
 
 #define SENS_TRIG_DIVISOR               (CPU_FREQUENCY / (4ul * SENS_FREQUENCY))

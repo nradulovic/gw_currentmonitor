@@ -117,16 +117,6 @@
 
 /*======================================================  LOCAL DATA TYPES  ==*/
 
-enum sensState
-{
-  SENS_IDLE,
-  SENS_STARTED,
-  SENS_SEARCHING_RISE,
-  SENS_RISE_FOUND,
-  SENS_SEARCHING_DROP,
-  SENS_DROP_FOUND
-};
-
 enum displayCmd
 {
   LED_ON,
@@ -136,11 +126,11 @@ enum displayCmd
 
 /*=============================================  LOCAL FUNCTION PROTOTYPES  ==*/
 
-static void hwInit(
+static void hw_init(
   void);
 
 #if !defined(NDEBUG)
-void debugPinInit(
+static void debugPinInit(
   void);
 #endif
 static void oscInit(
@@ -155,8 +145,6 @@ static void sensTriggerInit(
   void);
 static void sensIsr(
   void);
-void sensCompute(
-  void);
 static void sensProcess(
   void);
 static void sysTickInit(
@@ -167,9 +155,12 @@ static void displayInit(
   void);
 static void displayStatus(
   void);
-void ledDropFsm(
+static void process_rise(void);
+static void process_drop(void);
+static void process_signal(void);
+static void ledDropFsm(
   enum displayCmd       cmd);
-void ledRiseFsm(
+static void ledRiseFsm(
   enum displayCmd       cmd);
 void interrupt hiIsr(
   void);
@@ -178,13 +169,16 @@ void low_priority interrupt loIsr(
 
 /*=======================================================  LOCAL VARIABLES  ==*/
 
-static enum sensState SensState;
-static uint16_t AbsSignal;
+static uint16_t                 g_abs_signal;
+static int16_t                  g_zero;
+static enum displayCmd          g_led_rise_state;
+static enum displayCmd          g_led_drop_state;
+static int16_t                  g_signalBuff[SAMPLES_PER_POINT];
 
 /*======================================================  GLOBAL VARIABLES  ==*/
 /*============================================  LOCAL FUNCTION DEFINITIONS  ==*/
 
-static void hwInit(
+static void hw_init(
   void)
 {
   INTCONbits.GIEH       = 0;                                                    /* Disable all high prio interrupts                         */
@@ -208,7 +202,7 @@ static void hwInit(
 
 /*-- Debug pin ---------------------------------------------------------------*/
 #if !defined(NDEBUG)
-void debugPinInit(
+static void debugPinInit(
   void)
 {
   DEBUG_PIN_LAT   &= ~DEBUG_PIN_PIN_Msk;
@@ -343,15 +337,28 @@ static void sensTriggerInit(
   T1CONbits.TMR1ON      = 1;
 }
 
-void sensCompute(
+static void sensSetZero(uint16_t zero)
+{
+    uint8_t                     idx;
+
+    g_zero = (int16_t)zero / SAMPLES_PER_POINT;
+
+    idx = SAMPLES_PER_POINT;
+
+    while (idx-- != 0) {
+        g_signalBuff[idx] = 0;
+    }
+}
+
+static void sensCompute(
   void)
 {
   int16_t             signal;
   uint8_t             samples;
-  static int16_t      signalBuff[SAMPLES_PER_POINT];
+  
   static uint8_t      signalPos;
 
-  signalBuff[signalPos++] = (int16_t)ADRES - (int16_t)SENS_ZERO_VALUE;
+  g_signalBuff[signalPos++] = (int16_t)ADRES - g_zero;
   signalPos &= ~((uint8_t)-1 << (BIT_UINT8_LOG2(SAMPLES_PER_POINT)));
   signal  = 0;
   samples = SAMPLES_PER_POINT;
@@ -359,257 +366,197 @@ void sensCompute(
   while (samples != 0)
   {
     samples--;
-    signal += signalBuff[samples];
+    signal += g_signalBuff[samples];
   }
-  AbsSignal = ABS16(signal);
+  g_abs_signal = ABS16(signal);
 }
 
-static void sensIsr(
-  void)
+static void process_rise(void)
+{
+    enum process_rise_state {
+        STATE_RISE_INIT,
+        STATE_RISE_FIND_MIN,
+        STATE_RISE_FOUND
+    };
+    static enum process_rise_state rise_state = STATE_RISE_INIT;
+    static uint32_t     abs_signal_min;
+    static uint32_t     fact_signal_min;
+    static lvTmr_T      rise_timer;
+
+    switch (rise_state) {
+        case STATE_RISE_INIT : {
+            rise_timer = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_CURRENT_RISE_TIME_FIND_MIN));
+            RELAY_RISE_SET_INACTIVE();
+            g_led_rise_state = LED_OFF;
+            abs_signal_min = UINT32_MAX;
+            rise_state = STATE_RISE_FIND_MIN;
+            /*
+             * NO BREAK
+             */
+        }
+        case STATE_RISE_FIND_MIN : {
+            uint32_t          fact_abs_signal_min;
+            uint32_t          fact_signal;
+
+            if (abs_signal_min > (uint32_t)g_abs_signal)
+            {
+                abs_signal_min = (uint32_t)g_abs_signal;
+            }
+            fact_abs_signal_min = abs_signal_min * (CFG_CURRENT_RISE_PERCENTAGE + 100ul);
+            fact_signal         = (uint32_t)g_abs_signal * 100ul;
+
+            if (fact_abs_signal_min < fact_signal)
+            {
+                RELAY_RISE_SET_ACTIVE();
+                g_led_rise_state = LED_ON;
+                rise_state = STATE_RISE_FOUND;
+            }
+            break;
+        }
+        case STATE_RISE_FOUND : {
+            process_drop();
+            break;
+        }
+        default : {
+            break;
+        }
+    }
+}
+
+static void process_drop(void)
+{
+    enum process_drop_state {
+        STATE_DROP_INIT,
+        STATE_DROP_START,
+        STATE_DROP_SEARCH_DROP,
+        STATE_DROP_FOUND
+    };
+    static enum process_drop_state drop_state = STATE_DROP_INIT;
+    static uint32_t       abs_signal_max;
+
+    switch (drop_state) {
+        case STATE_DROP_INIT : {
+            RELAY_DROP_SET_INACTIVE();
+            g_led_drop_state = LED_BLINK;
+            abs_signal_max = 0;
+            drop_state = STATE_DROP_START;
+            /*
+             * NO BREAK
+             */
+        }
+        case STATE_DROP_START : {
+            if (g_abs_signal > CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA)) {
+                drop_state = STATE_DROP_SEARCH_DROP;
+            }
+            break;
+        }
+        case STATE_DROP_SEARCH_DROP : {
+            uint32_t          fact_abs_signal_max;
+            uint32_t          fact_signal;
+
+            if (abs_signal_max < (uint32_t)g_abs_signal)
+            {
+                abs_signal_max = (uint32_t)g_abs_signal;
+            }
+            fact_abs_signal_max = abs_signal_max * 100ul;
+            fact_signal         = (uint32_t)g_abs_signal * (CFG_CURRENT_DROP_PERCENTAGE + 100ul);
+
+            if (fact_abs_signal_max > fact_signal)
+            {
+                RELAY_DROP_SET_ACTIVE();
+                g_led_drop_state = LED_ON;
+                drop_state = STATE_DROP_FOUND;
+            }
+            break;
+        }
+        case STATE_DROP_FOUND : {
+            break;
+        }
+        default : {
+            break;
+        }
+    }
+}
+
+static void process_signal(void)
+{
+    enum process_signal_state {
+        STATE_SIG_INIT,
+        STATE_SIG_STABILIZE,
+        STATE_SIG_ZERO_ACC,
+        STATE_SIG_FIND_START,
+        STATE_SIG_DEAD_TIME,
+        STATE_SIG_PROSESS
+    };
+    static enum process_signal_state state = STATE_SIG_INIT;
+    static lvTmr_T              signal_timer;
+    static uint32_t             signal_zero_acc;
+    static uint32_t             signal_zero_cnt;
+
+    switch (state) {
+        case STATE_SIG_INIT : {
+            g_led_rise_state = LED_OFF;
+            g_led_drop_state = LED_OFF;
+            RELAY_DROP_SET_INACTIVE();
+            RELAY_RISE_SET_INACTIVE();
+            state = STATE_SIG_STABILIZE;
+            signal_timer = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_INITIAL_WAIT));
+
+            break;
+        }
+        case STATE_SIG_STABILIZE : {
+            if (lvTmrIsDoneI(signal_timer)) {
+                signal_timer    = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_FIND_ZERO));
+                signal_zero_acc = 0;
+                signal_zero_cnt = 0;
+                state           = STATE_SIG_ZERO_ACC;
+            }
+            break;
+        }
+        case STATE_SIG_ZERO_ACC : {
+            signal_zero_acc += g_abs_signal;
+            signal_zero_cnt++;
+
+            if (lvTmrIsDoneI(signal_timer)) {
+                uint16_t        new_zero;
+
+                new_zero = (uint16_t)(signal_zero_acc / signal_zero_cnt);
+                sensSetZero(new_zero);
+                state = STATE_SIG_FIND_START;
+            }
+            break;
+        }
+        case STATE_SIG_FIND_START : {
+            if (g_abs_signal > CURRENT_MA_TO_INT(CFG_CURRENT_START_DETECTION_MA)) {
+                signal_timer = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_INITIAL_PEAK));
+                state = STATE_SIG_DEAD_TIME;
+            }
+            break;
+        }
+        case STATE_SIG_DEAD_TIME : {
+
+            if (lvTmrIsDoneI(signal_timer)) {
+                state = STATE_SIG_PROSESS;
+            }
+            break;
+        }
+        case STATE_SIG_PROSESS : {
+            process_rise();
+
+            break;
+        }
+        default : {
+            break;
+        }
+    }
+}
+
+static void sensIsr(void)
 {
   if (PIR1bits.ADIF == 1)
   {
     PIR1bits.ADIF = 0;
     sensCompute();
-    sensProcess();
-  }
-}
-
-static void sensProcess(
-  void)
-{
-  enum sensProcessState
-  {
-    STATE_INIT,
-    STATE_FIND_START,
-    STATE_INITIAL_PEAK,
-    STATE_COMPUTE_MIN,
-    STATE_SEARCH_RISE,
-    STATE_SEARCH_RISE_EXIT,
-    STATE_SEARCH_DROP,
-    STATE_SEARCH_DROP_EXIT,
-    STATE_NOTIFY_ACTIVE,
-    STATE_NOTIFY_INACTIVE
-  };
-  static enum sensProcessState state = STATE_INIT;
-  static union
-  {
-    lvTmr_T             initialPeak;
-#if (CFG_TIME_FIND_MAX != 0)
-    lvTmr_T             findMax;
-#endif
-    lvTmr_T             findMin;
-    lvTmr_T             notify;
-  }                     tmr;
-  static lvTmr_T        tmrExit;
-  static uint16_t       absSignalMax;
-#if (CFG_CURRENT_RISE_ALGORITHM == 0)
-  static uint32_t       absSignalMinAcc;
-#else
-  static uint16_t       absSignalMin;
-#endif
-  static uint24_t       factAbsSignalMin;
-  
-  switch (state)
-  {
-    case STATE_INIT:
-    {
-      RELAY_DROP_SET_INACTIVE();
-      RELAY_RISE_SET_INACTIVE();
-      SensState = SENS_IDLE;
-      state     = STATE_FIND_START;
-      return;
-    }
-    case STATE_FIND_START:
-    {
-      if (AbsSignal > CURRENT_MA_TO_INT(CFG_CURRENT_START_DETECTION_MA))
-      {
-        tmr.initialPeak = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_INITIAL_PEAK));
-        SensState = SENS_STARTED;
-        state     = STATE_INITIAL_PEAK;
-      }
-
-      return;
-    }
-    case STATE_INITIAL_PEAK:
-    {
-      if (lvTmrIsDoneI(tmr.initialPeak))
-      {
-        tmr.findMin = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_FIND_MIN));
-#if (CFG_CURRENT_RISE_ALGORITHM == 0)
-        absSignalMinAcc = (uint32_t)0u;
-#else
-        absSignalMin = (uint16_t)-1;
-#endif
-        state = STATE_COMPUTE_MIN;
-      }
-
-      return;
-    }
-    case STATE_COMPUTE_MIN :
-    {
-#if (CFG_CURRENT_RISE_ALGORITHM == 0)
-      absSignalMinAcc += AbsSignal;
-
-      if (lvTmrIsDoneI(tmr.findMin))
-      {
-        uint24_t       absSignalMin;
-
-        absSignalMin = (uint24_t)(absSignalMinAcc /
-          (((uint32_t)CFG_TIME_FIND_MIN * (uint32_t)SENS_FREQUENCY) / (uint32_t)1000ul));
-        factAbsSignalMin = absSignalMin * (uint24_t)(CFG_CURRENT_RISE_PERCENTAGE + 100ul);
-        state = STATE_SEARCH_RISE;
-      }
-#else
-      if (absSignalMin > AbsSignal)
-      {
-        if (AbsSignal > CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA))
-        {
-          absSignalMin = AbsSignal;
-        }
-      }
-
-      if (lvTmrIsDoneI(tmr.findMin))
-      {
-        if (absSignalMin == (uint16_t)-1)
-        {
-          state = STATE_INIT;
-        }
-        else
-        {
-          factAbsSignalMin = absSignalMin * (uint24_t)(CFG_CURRENT_RISE_PERCENTAGE + 100ul);
-          state = STATE_SEARCH_RISE;
-        }
-      }
-#endif
-      return;
-    }
-    case STATE_SEARCH_RISE :
-    {
-      uint24_t          factSignal;
-
-      SensState  = SENS_SEARCHING_RISE;
-
-      if (AbsSignal < CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA))
-      {
-        tmrExit = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_WAIT_FOR_EXIT));
-        state = STATE_SEARCH_RISE_EXIT;
-
-        return;
-      }
-      factSignal = (uint24_t)AbsSignal * (uint24_t)100ul;
-
-      if (factAbsSignalMin < factSignal)
-      {
-        RELAY_RISE_SET_ACTIVE();
-#if (CFG_TIME_FIND_MAX != 0)
-        tmr.findMax = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_FIND_MAX));
-#endif
-        absSignalMax = 0u;
-        SensState = SENS_RISE_FOUND;
-        state     = STATE_SEARCH_DROP;
-      }
-
-      return;
-    }
-    case STATE_SEARCH_RISE_EXIT :
-    {
-      if (AbsSignal > CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA))
-      {
-        lvTmrDeleteI(tmrExit);
-        state = STATE_SEARCH_RISE;
-      }
-      else if (lvTmrIsDoneI(tmrExit))
-      {
-        state = STATE_INIT;
-      }
-
-      return;
-    }
-    case STATE_SEARCH_DROP:
-    {
-      uint24_t          factAbsSignalMax;
-      uint24_t          factSignal;
-
-      SensState = SENS_SEARCHING_DROP;
-
-#if (CFG_TIME_FIND_MAX != 0)
-      if (lvTmrIsDoneI(tmr.findMax))
-      {
-        state = STATE_INIT;
-      }
-      else 
-#endif
-      if (AbsSignal < CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA))
-      {
-        tmrExit = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_WAIT_FOR_EXIT));
-        state = STATE_SEARCH_DROP_EXIT;
-      }
-      else if (AbsSignal > CURRENT_MA_TO_INT(CFG_CURRENT_START_DETECTION_MA))
-      {
-        if (absSignalMax < AbsSignal)
-        {
-          absSignalMax = AbsSignal;
-        }
-        factAbsSignalMax = (uint24_t)absSignalMax * (uint24_t)100u;
-        factSignal       = (uint24_t)AbsSignal *
-          (uint24_t)(CFG_CURRENT_DROP_PERCENTAGE + 100u);
-
-        if (factAbsSignalMax > factSignal)
-        {
-#if (CFG_TIME_FIND_MAX != 0)
-          lvTmrDeleteI(tmr.findMax);
-#endif
-          SensState = SENS_DROP_FOUND;
-          state     = STATE_NOTIFY_ACTIVE;
-        }
-      }
-
-      return;
-    }
-    case STATE_SEARCH_DROP_EXIT :
-    {
-      if (AbsSignal > CURRENT_MA_TO_INT(CFG_CURRENT_MIN_DETECTION_MA))
-      {
-        lvTmrDeleteI(tmrExit);
-        state = STATE_SEARCH_DROP;
-      }
-      else if (lvTmrIsDoneI(tmrExit))
-      {
-#if (CFG_TIME_FIND_MAX != 0)
-        lvTmrDeleteI(tmr.findMax);
-#endif
-        state = STATE_INIT;
-      }
-#if (CFG_TIME_FIND_MAX != 0)
-      else if (lvTmrIsDoneI(tmr.findMax))
-      {
-        lvTmrDeleteI(tmrExit);
-        state = STATE_INIT;
-      }
-#endif
-
-      return;
-    }
-    case STATE_NOTIFY_ACTIVE:
-    {
-      RELAY_DROP_SET_ACTIVE();
-#if (CFG_TIME_NOTIFY_ACTIVE != 0)
-      tmr.notify  = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_NOTIFY_ACTIVE));
-      state       = STATE_NOTIFY_INACTIVE;
-#endif
-      return;
-    }
-    case STATE_NOTIFY_INACTIVE:
-    {
-#if (CFG_TIME_NOTIFY_ACTIVE != 0)
-      if (lvTmrIsDoneI(tmr.notify))
-      {
-        state = STATE_INIT;
-      }
-#endif
-      return;
-    }
   }
 }
 
@@ -661,61 +608,8 @@ static void displayInit(
   LED_RISE_TRIS   &= ~LED_RISE_PIN_Msk;
 }
 
-static void displayStatus(
-  void)
-{
-  static enum displayCmd ledDropCmd = LED_OFF;
-  static enum displayCmd ledRiseCmd = LED_OFF;
-  
-  if (DeviceStatus != 0u)
-  {
-    LED_DROP_SET_ACTIVE();
-    LED_RISE_SET_ACTIVE();
 
-    while (true);
-  }
-
-  switch (SensState)
-  {
-    case SENS_IDLE:
-    {
-      ledDropCmd = LED_OFF;
-      ledRiseCmd = LED_OFF;
-      break;
-    }
-    case SENS_STARTED :
-    {
-      ledDropCmd = LED_OFF;
-      ledDropCmd = LED_OFF;
-      break;
-    }
-    case SENS_SEARCHING_RISE:
-    {
-      ledDropCmd = LED_OFF;
-      ledRiseCmd = LED_BLINK;
-      break;
-    }
-    case SENS_RISE_FOUND:
-    {
-      ledRiseCmd = LED_ON;
-      break;
-    }
-    case SENS_SEARCHING_DROP:
-    {
-      ledDropCmd = LED_BLINK;
-      break;
-    }
-    case SENS_DROP_FOUND:
-    {
-      ledDropCmd = LED_ON;
-      break;
-    }
-  }
-  ledDropFsm(ledDropCmd);
-  ledRiseFsm(ledRiseCmd);
-}
-
-void ledDropFsm(
+static void ledDropFsm(
   enum displayCmd       cmd)
 {
   enum displayState
@@ -803,7 +697,7 @@ void ledDropFsm(
   }
 }
 
-void ledRiseFsm(
+static void ledRiseFsm(
   enum displayCmd       cmd)
 {
   enum displayState
@@ -901,7 +795,7 @@ int main(
   (void)argc;
   (void)argv;
   lvTmrInit();
-  hwInit();
+  hw_init();
 
   while (true);
 
@@ -914,7 +808,9 @@ void interrupt hiIsr(
   DEBUG_PIN_SET_ACTIVE();
   sensIsr();
   sysTickIsr();
-  displayStatus();
+  process_signal();
+  ledRiseFsm(g_led_rise_state);
+  ledDropFsm(g_led_drop_state);
   DEBUG_PIN_SET_INACTIVE();
 }
 

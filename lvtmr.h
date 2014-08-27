@@ -19,7 +19,7 @@
 
 /*===============================================================  MACRO's  ==*/
 
-#define LVTMR_MAX_NUM_OF_TIMERS         4
+#define LVTMR_MAX_NUM_OF_TIMERS         8
 
 #define LVTMR_MS_TO_TICK(ms)                                                    \
   (((uint32_t)(ms) * (uint32_t)LVTMR_TICK_FREQUENCY) / (uint32_t)1000u)
