@@ -170,7 +170,7 @@ void low_priority interrupt loIsr(
 /*=======================================================  LOCAL VARIABLES  ==*/
 
 static uint16_t                 g_abs_signal;
-static int16_t                  g_zero;
+static int16_t                  g_zero = 0;
 static enum displayCmd          g_led_rise_state;
 static enum displayCmd          g_led_drop_state;
 static int16_t                  g_signalBuff[SAMPLES_PER_POINT];
@@ -342,6 +342,7 @@ static void sensSetZero(uint16_t zero)
     uint8_t                     idx;
 
     g_zero = (int16_t)zero / SAMPLES_PER_POINT;
+    g_zero++;
 
     idx = SAMPLES_PER_POINT;
 
@@ -499,7 +500,7 @@ static void process_signal(void)
             g_led_drop_state = LED_OFF;
             RELAY_DROP_SET_INACTIVE();
             RELAY_RISE_SET_INACTIVE();
-            state = STATE_SIG_STABILIZE;
+            state        = STATE_SIG_STABILIZE;
             signal_timer = lvTmrCreateI(LVTMR_MS_TO_TICK(CFG_TIME_INITIAL_WAIT));
 
             break;
@@ -796,6 +797,8 @@ int main(
   (void)argv;
   lvTmrInit();
   hw_init();
+
+
 
   while (true);
 
